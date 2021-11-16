@@ -8,29 +8,21 @@ import socket
 import sys  
 import json
 import time
-from lumos import DMXSource
+
 import _thread
 import matplotlib.path as pltPath
 from playsound import playsound
 
-class Universe:
-	def __init__(self,source,channelcount):
-		self.source = source
-		self.pixelcount = int(channelcount/3)
+import serial
 
 #EDIT THESE LINES AS NEEDED******************************************************
 #Configure the Universes to send to when controlling the pixels
 #format is as follows:
 #U1 = Universe(DMXSource(universe=UNIVERSE NUMBER),NUMBER OF CHANNELS IN THE UNIVERSE)  #for RGB pixels, there are three channels per pixel
-U1 = Universe(DMXSource(universe=2000),510)
-U2 = Universe(DMXSource(universe=2001),510)
-U3 = Universe(DMXSource(universe=2002),510)
-U4 = Universe(DMXSource(universe=2003),510)
-U5 = Universe(DMXSource(universe=2004),60)
-universes = [U1,U2,U3,U4,U5]
-totalpixels = 750                 #total number of pixels to map
-cap = cv2.VideoCapture('rtsp://user:password@ip.addr.of.cam:88/videoMain')  #Foscam X1 address format - others will be different
-onval = [100,100,100]             #RGB value to use when turning the pixels on for detection
+ser = serial.Serial('COM18')
+totalpixels = 400                 #total number of pixels to map
+cap = cv2.VideoCapture(0)  #Foscam X1 address format - others will be different
+onval = [80,80,80]             #RGB value to use when turning the pixels on for detection
 outfilename = 'out' + str(round(time.time())) + '.csv'  #filename to put the output data 
 #**********************************************************************************
 
@@ -129,25 +121,15 @@ class PolygonDrawer(object):
 output = []
 def all_off():
 	#shut all pixels off
-	for universe in universes:
-		universe.source.send_data(data=[0,0,0]*universe.pixelcount)
-def everyother():
-	#turn every other pixel on - for testing
-	for universe in universes:
-		universe.source.send_data(data=onval*universe.pixelcount)
-		counter = 0
-		for i,element in enumerate(data):
-			if counter == 3 or counter == 4 or counter == 5:
-				data[i] = 0
-			counter = counter + 1
-			if counter > 5:
-				counter = 0
+	ser.write(b'-1') 
+
 def all_on():
 	#turn all pixels on white
-	for universe in universes:
-		universe.source.send_data(data=onval*universe.pixelcount)
+	ser.write(b'-2') 
 
-
+def single_on(index):
+	ser.write(bytes(str(index), encoding='utf8'))
+	time.sleep(2)
 
 #Polygon masking - turn on all pixels and allow the user to draw a polygon around them to prevent
 #detecting light sources outside the area of interest
@@ -177,119 +159,122 @@ all_off()
 time.sleep(1)
 cv2.namedWindow("Camera1", flags=cv2.WINDOW_NORMAL)
 cv2.resizeWindow("Camera1", 800, 600);
-for unum, universe in enumerate(universes):
-	for index in range(0,universe.pixelcount):
-		attempts = 1
-		while attempts >0:
-			pixelout = {}
-			all_off()
-			time.sleep(0.7)
-			image_off = vsource.currentFrame
-			print("image_off")
-			cv2.imshow("Camera1",image_off)
-			cv2.resizeWindow("Camera1", 800, 600);
-			cv2.waitKey(500)
-			universe.source.send_data(data=[0,0,0]*(index) + onval + [0,0,0]*(universe.pixelcount-index-1))
-			time.sleep(0.7)
-			image = vsource.currentFrame
-			print("image")
-			cv2.imshow("Camera1",image)
-			cv2.waitKey(500)
-			####MASK OUT THE PORTIONS OF THE IMAGES WE DON'T CARE ABOUT###########
-			height, width, channels = image_off.shape
-			canvas = np.zeros((height,width), np.uint8)
-			polymask = cv2.fillPoly(canvas, np.array([vsource.polygon]), [255,255,255])
-			masked_image_off = cv2.bitwise_and(image_off,image_off, mask = polymask)
-			masked_image = cv2.bitwise_and(image,image, mask = polymask)
-			#######################IMAGE DIFFERENCE###############################
-			#https://www.pyimagesearch.com/2017/06/19/image-difference-with-opencv-and-python/
-			gray = cv2.cvtColor(masked_image, cv2.COLOR_BGR2GRAY)
-			gray_off = cv2.cvtColor(masked_image_off, cv2.COLOR_BGR2GRAY)
-			# compute the Structural Similarity Index (SSIM) between the two
-			# images, ensuring that the difference image is returned
-			#(score, diff) = measure.compare_ssim(gray, gray_off, full=True)
-			(score, diff) = metrics.structural_similarity(gray, gray_off, full=True)
-			diff = (diff * 255).astype("uint8")
-			print("SSIM: {}".format(score))
-			# threshold the difference image, followed by finding contours to
-			# obtain the regions of the two input images that differ
-			thresh = cv2.threshold(diff, 0, 255,cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-			cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-			cnts = grab_contours(cnts)
-			diff_mask = thresh
-			diff_masked_gray = cv2.bitwise_and(gray, gray, mask = diff_mask)
-			blurred = cv2.GaussianBlur(diff_masked_gray, (11, 11), 0)
-			thresh2 = cv2.threshold(blurred, 150, 255, cv2.THRESH_BINARY)[1]
-			# perform a series of erosions and dilations to remove
-			# any small blobs of noise from the thresholded image
-			#thresh = cv2.erode(thresh, None, iterations=2)
-			#thresh = cv2.dilate(thresh, None, iterations=4)
-			# perform a connected component analysis on the thresholded
-			# image, then initialize a mask to store only the "large"
-			# components
-			labels = measure.label(thresh2, connectivity=2, background=0)
-			mask = np.zeros(thresh2.shape, dtype="uint8")
-			# loop over the unique components
-			for label in np.unique(labels):
-				# if this is the background label, ignore it
-				if label == 0:
-					continue
-				# otherwise, construct the label mask and count the
-				# number of pixels 
-				labelMask = np.zeros(thresh2.shape, dtype="uint8")
-				labelMask[labels == label] = 255
-				numPixels = cv2.countNonZero(labelMask)
-				# if the number of pixels in the component is sufficiently
-				# large, then add it to our mask of "large blobs"
-				if numPixels > 50:
-					mask = cv2.add(mask, labelMask)
-			# find the contours in the mask, then sort them from left to
-			# right
-			cnts = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL,
-				cv2.CHAIN_APPROX_SIMPLE)
-			print(cnts)
-			cnts = cnts[0] if (imutils.is_cv2() or imutils.is_cv4()) else cnts[1]
-			if len(cnts) > 0:
-				cnts = contours.sort_contours(cnts)[0]
-				# loop over the contours
-				for (i, c) in enumerate(cnts):
-					# draw the bright spot on the image
-					(x, y, w, h) = cv2.boundingRect(c)
-					((cX, cY), radius) = cv2.minEnclosingCircle(c)
-					cv2.circle(image, (int(cX), int(cY)), int(radius),
-						(0, 0, 255), 3)
-					cv2.putText(image, str(cX) + " " + str(cY), (x, y - 15),
-						cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
-					# show the output image
-					cv2.imshow("Camera1", image)
-					cv2.waitKey(1)
-				if len(cnts)== 1:
-					attempts = 0
-					print("Pixel " + str(index) + " coordinates: [" + str(x) + "," + str(y) + "]")
-					vsource.outputpoints[unum*170+index] = [unum*170+index,cX,cY]
-				else:
-					print("too many bright spots, trying again!")
-					attempts = attempts + 1
-					cv2.imshow("Camera1",image)
-					cv2.waitKey(5)
-			else:
-				print("No bright spots found")
-				attempts = attempts + 1
-			if attempts >= 2:
-				print('too many points attempts - click on the pixel to locate or click outside of polygon to skip') 
-				playsound('alert.wav')
+
+for index in range(totalpixels):
+	attempts = 1
+	while attempts >0:
+		pixelout = {}
+		all_off()
+		time.sleep(0.7)
+		image_off = vsource.currentFrame
+		print("image_off")
+		cv2.imshow("Camera1",image_off)
+		cv2.resizeWindow("Camera1", 800, 600);
+		cv2.waitKey(500)
+
+		single_on(index)
+		
+		time.sleep(0.7)
+		image = vsource.currentFrame
+		print("image")
+		cv2.imshow("Camera1",image)
+		cv2.waitKey(500)
+		####MASK OUT THE PORTIONS OF THE IMAGES WE DON'T CARE ABOUT###########
+		height, width, channels = image_off.shape
+		canvas = np.zeros((height,width), np.uint8)
+		polymask = cv2.fillPoly(canvas, np.array([vsource.polygon]), [255,255,255])
+		masked_image_off = cv2.bitwise_and(image_off,image_off, mask = polymask)
+		masked_image = cv2.bitwise_and(image,image, mask = polymask)
+		#######################IMAGE DIFFERENCE###############################
+		#https://www.pyimagesearch.com/2017/06/19/image-difference-with-opencv-and-python/
+		gray = cv2.cvtColor(masked_image, cv2.COLOR_BGR2GRAY)
+		gray_off = cv2.cvtColor(masked_image_off, cv2.COLOR_BGR2GRAY)
+		# compute the Structural Similarity Index (SSIM) between the two
+		# images, ensuring that the difference image is returned
+		#(score, diff) = measure.compare_ssim(gray, gray_off, full=True)
+		(score, diff) = metrics.structural_similarity(gray, gray_off, full=True)
+		diff = (diff * 255).astype("uint8")
+		print("SSIM: {}".format(score))
+		# threshold the difference image, followed by finding contours to
+		# obtain the regions of the two input images that differ
+		thresh = cv2.threshold(diff, 0, 255,cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+		cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+		cnts = grab_contours(cnts)
+		diff_mask = thresh
+		diff_masked_gray = cv2.bitwise_and(gray, gray, mask = diff_mask)
+		blurred = cv2.GaussianBlur(diff_masked_gray, (11, 11), 0)
+		thresh2 = cv2.threshold(blurred, 150, 255, cv2.THRESH_BINARY)[1]
+		# perform a series of erosions and dilations to remove
+		# any small blobs of noise from the thresholded image
+		#thresh = cv2.erode(thresh, None, iterations=2)
+		#thresh = cv2.dilate(thresh, None, iterations=4)
+		# perform a connected component analysis on the thresholded
+		# image, then initialize a mask to store only the "large"
+		# components
+		labels = measure.label(thresh2, connectivity=2, background=0)
+		mask = np.zeros(thresh2.shape, dtype="uint8")
+		# loop over the unique components
+		for label in np.unique(labels):
+			# if this is the background label, ignore it
+			if label == 0:
+				continue
+			# otherwise, construct the label mask and count the
+			# number of pixels 
+			labelMask = np.zeros(thresh2.shape, dtype="uint8")
+			labelMask[labels == label] = 255
+			numPixels = cv2.countNonZero(labelMask)
+			# if the number of pixels in the component is sufficiently
+			# large, then add it to our mask of "large blobs"
+			if numPixels > 50:
+				mask = cv2.add(mask, labelMask)
+		# find the contours in the mask, then sort them from left to
+		# right
+		cnts = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL,
+			cv2.CHAIN_APPROX_SIMPLE)
+		print(cnts)
+		cnts = cnts[0] if (imutils.is_cv2() or imutils.is_cv4()) else cnts[1]
+		if len(cnts) > 0:
+			cnts = contours.sort_contours(cnts)[0]
+			# loop over the contours
+			for (i, c) in enumerate(cnts):
+				# draw the bright spot on the image
+				(x, y, w, h) = cv2.boundingRect(c)
+				((cX, cY), radius) = cv2.minEnclosingCircle(c)
+				cv2.circle(image, (int(cX), int(cY)), int(radius),
+					(0, 0, 255), 3)
+				cv2.putText(image, str(cX) + " " + str(cY), (x, y - 15),
+					cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
+				# show the output image
 				cv2.imshow("Camera1", image)
-				cv2.setMouseCallback("Camera1",on_mouse,[unum*170+index,vsource])
-				done = 0
-				while done == 0:
-					cv2.waitKey(50)
-					if vsource.outputpoints[unum*170+index] != [0,0,0]:
-						done = 1
-					else:
-						done = 0
+				cv2.waitKey(1)
+			if len(cnts)== 1:
 				attempts = 0
-		with open('data1.txt', 'a') as outfile:
-			outfile.write(str(unum*170+index) + ',' + str(vsource.outputpoints[unum*170+index][1]) + ',' + str(vsource.outputpoints[unum*170+index][2]) + "\n")
+				print("Pixel " + str(index) + " coordinates: [" + str(x) + "," + str(y) + "]")
+				vsource.outputpoints[index] = [index,cX,cY]
+			else:
+				print("too many bright spots, trying again!")
+				attempts = attempts + 1
+				cv2.imshow("Camera1",image)
+				cv2.waitKey(5)
+		else:
+			print("No bright spots found")
+			attempts = attempts + 1
+		if attempts >= 2:
+			print('too many points attempts - click on the pixel to locate or click outside of polygon to skip') 
+			#playsound('alert.wav')
+			cv2.imshow("Camera1", image)
+			cv2.setMouseCallback("Camera1",on_mouse,[index,vsource])
+			done = 0
+			while done == 0:
+				cv2.waitKey(50)
+				if vsource.outputpoints[index] != [0,0,0]:
+					done = 1
+				else:
+					done = 0
+			attempts = 0
+	with open('data1.txt', 'a') as outfile:
+		outfile.write(str(index) + ',' + str(vsource.outputpoints[index][1]) + ',' + str(vsource.outputpoints[index][2]) + "\n")
+
 all_off()
 
 with open(outfilename, 'w') as outfile:
